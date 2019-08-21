@@ -17,7 +17,7 @@ FROM alpine
 RUN apk update && apk add --no-cache ca-certificates && update-ca-certificates
 
 # default:
-ENV REMOTE_SVC_URL https://api.exchangeratesapi.io/latest
+ENV REMOTE_SVC_URL https://api.ratesapi.io/api/latest
 
 EXPOSE 8080
 COPY --from=builder /root/main /main
