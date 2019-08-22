@@ -1,11 +1,14 @@
 package main
 
 import (
-	"log"
-	"strconv"
-	"net/http"
 	"encoding/json"
+	"fmt"
+	"github.com/gorilla/mux"
+	"log"
+	"net/http"
 )
+
+type HandlerFunc func(params Params) (interface{}, error)
 
 const (
 	baseParameter   = "base"
@@ -13,126 +16,85 @@ const (
 	sumParameter    = "sum"
 )
 
-func AttitudeBase(remoteSvc string, w http.ResponseWriter, r *http.Request) {
-	currencies, err := currencyValues(remoteSvc)
-	if err != nil {
-		log.Printf("%s [AttitudeBase] getting currency values failed. Debug: %v", r.RemoteAddr, err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
+func Handler(handler HandlerFunc) func(http.ResponseWriter, *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("%s %s", r.Method, r.URL)
+		out, err := handler(mux.Vars(r))
+		if err != nil {
+			handleError(w, err)
+		} else {
+			w.WriteHeader(http.StatusOK)
+			output(w, out)
+		}
 	}
-
-	baseKey, err := parameter(baseParameter, r)
-	if err != nil {
-		log.Printf("%s [AttitudeBase] missing parameter `%s` in http.Request. Debug: %v", r.RemoteAddr, baseParameter, err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	if _, ok := currencies[baseKey]; !ok {
-		log.Printf("%s [AttitudeBase] unsupported base currency: %s", r.RemoteAddr, baseKey)
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
-	w.Header().Set("content-type", "application/json")
-	output, err := attitudeByBase(baseKey, currencies)
-	if err != nil {
-		log.Printf("%s [AttitudeBase] unexpected behavior. Debug: %v", r.RemoteAddr, err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	outputJson, _ := json.Marshal(output)
-	w.Write([]byte(string(outputJson)))
 }
 
-func AttitudePair(remoteSvc string, w http.ResponseWriter, r *http.Request) {
-	currencies, err := currencyValues(remoteSvc)
-	if err != nil {
-		log.Printf("%s [AttitudePair] getting currency values failed. Debug: %v", r.RemoteAddr, err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	baseKey, err := parameter(baseParameter, r)
-	if err != nil {
-		log.Printf("%s [AttitudePair] missing parameter `%s` in http.Request. Debug: %v", r.RemoteAddr, baseParameter, err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	baseValue, ok := currencies[baseKey]
-	if !ok {
-		log.Printf("%s [AttitudePair] unsupported base currency: %s", r.RemoteAddr, baseKey)
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
-	targetKey, err := parameter(targetParameter, r)
-	if err != nil {
-		log.Printf("%s [AttitudePair] missing parameter `%s` in http.Request. Debug: %v", r.RemoteAddr, targetParameter, err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	targetValue, ok := currencies[targetKey]
-	if !ok {
-		log.Printf("%s [AttitudePair] unsupported target currency: %s", r.RemoteAddr, targetKey)
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
+func output(w http.ResponseWriter, out interface{}) {
 	w.Header().Set("content-type", "application/json")
-	output := targetValue / baseValue
-	outputJson, _ := json.Marshal(output)
-	w.Write([]byte(string(outputJson)))
+	j, err := json.Marshal(out)
+	if err != nil {
+		log.Fatalf("error marshalling output")
+	}
+	_, err = w.Write(j)
+	if err != nil {
+		log.Fatalf("error writing output")
+	}
 }
 
-func AttitudeSum(remoteSvc string, w http.ResponseWriter, r *http.Request) {
-	currencies, err := currencyValues(remoteSvc)
-	if err != nil {
-		log.Printf("%s [AttitudeSum] getting currency values failed. Debug: %v", r.RemoteAddr, err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
+func handleError(w http.ResponseWriter, err error) {
+	log.Printf("error handling request: %s", err.Error())
+	jsonError := struct {
+		Error string `json:"error"`
+	}{
+		Error: err.Error(),
 	}
+	w.WriteHeader(http.StatusInternalServerError)
+	output(w, jsonError)
+}
 
-	baseKey, err := parameter(baseParameter, r)
+// GetRates GET /currencies/<base> API method handler
+func GetRates(params Params) (interface{}, error) {
+	return getRates(params)
+}
+
+func getRates(params Params) (Rates, error) {
+	base, err := params.Str(baseParameter)
 	if err != nil {
-		log.Printf("%s [AttitudeSum] missing parameter `%s` in http.Request. Debug: %v", r.RemoteAddr, baseParameter, err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
+		return nil, fmt.Errorf("missing base parameter: %s", err.Error())
 	}
-	baseValue, ok := currencies[baseKey]
+	return fetchRates(base)
+}
+
+// GetRate GET /currencies/<base>/<target> API method handler
+func GetRate(params Params) (interface{}, error) {
+	return getRate(params)
+}
+
+func getRate(params Params) (float64, error) {
+	rates, err := getRates(params)
+	if err != nil {
+		return 0.0, fmt.Errorf("error getting rates: %s", err.Error())
+	}
+	target, err := params.Str(targetParameter)
+	if err != nil {
+		return 0.0, fmt.Errorf("missing target parameter: %s", err.Error())
+	}
+	value, ok := rates[target]
 	if !ok {
-		log.Printf("%s [AttitudeSum] unsupported base currency: %s", r.RemoteAddr, baseKey)
-		w.WriteHeader(http.StatusBadRequest)
-		return
+		return 0.0, fmt.Errorf("unsupported target currency: %s", target)
 	}
+	return value, nil
+}
 
-	targetKey, err := parameter(targetParameter, r)
+// CalculateSum GET /currencies/<base>/<target>/<sum> API method handler
+func CalculateSum(params Params) (interface{}, error) {
+	rate, err := getRate(params)
 	if err != nil {
-		log.Printf("%s [AttitudeSum] missing parameter `%s` in http.Request. Debug: %v", r.RemoteAddr, targetParameter, err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
+		return nil, fmt.Errorf("error getting rate: %s", err.Error())
 	}
-	targetValue, ok := currencies[targetKey]
-	if !ok {
-		log.Printf("%s [AttitudeSum] unsupported target currency: %s", r.RemoteAddr, targetKey)
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
-	sumStr, err := parameter(sumParameter, r)
+	sum, err := params.Float(sumParameter)
 	if err != nil {
-		log.Printf("%s [AttitudeSum] missing parameter `%s` in http.Request. Debug: %v", r.RemoteAddr, sumParameter, err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
+		return nil, fmt.Errorf("missing sum parameter: %s", err.Error())
 	}
-	sumValue, err := strconv.ParseFloat(sumStr, 32)
-	if err != nil {
-		log.Printf("%s [AttitudeSum] invalid sum parameter: %s", r.RemoteAddr, sumStr)
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
-	w.Header().Set("content-type", "application/json")
-	output := (targetValue / baseValue) * float32(sumValue)
-	outputJson, _ := json.Marshal(output)
-	w.Write([]byte(string(outputJson)))
+	return rate * sum, nil
 }

@@ -2,65 +2,74 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
+	"fmt"
 	"io/ioutil"
+	"log"
 	"net/http"
-
-	"github.com/gorilla/mux"
+	"os"
+	"strconv"
 )
 
-type Currencyes map[string]float32
+type Rates map[string]float64
 
 type Message struct {
-	Base  string     `json:"base"`
-	Rates Currencyes `json:"rates"`
+	Base  string `json:"base"`
+	Rates Rates  `json:"rates"`
 }
 
-func currencyValues(remoteSvc string) (result Currencyes, err error) {
-	resp, err := http.Get(remoteSvc)
-	if err != nil {
-		return
-	}
+var apiUrl string
 
-	defer resp.Body.Close()
+func init() {
+	apiUrl = os.Getenv("REMOTE_SVC_URL")
+	if apiUrl == "" {
+		apiUrl = "https://api.ratesapi.io/api/latest?base=%s"
+	}
+}
+
+func fetchRates(base string) (Rates, error) {
+	resp, err := http.Get(fmt.Sprintf(apiUrl, base))
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		err := resp.Body.Close()
+		if err != nil {
+			log.Printf("error closing response body: %s", err.Error())
+		}
+	}()
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		return
+		return nil, err
 	}
-
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("error fetching rates: status code: %d, response: %s", resp.StatusCode, string(body))
+	}
 	var msg Message
 	err = json.Unmarshal(body, &msg)
 	if err != nil {
-		return
+		return nil, err
 	}
-
-	result = Currencyes{msg.Base: 1.0}
-	for currency, attitude := range msg.Rates {
-		result[currency] = attitude
+	if msg.Rates == nil {
+		return nil, fmt.Errorf("error fetching rates: unsupported response: %s", string(body))
 	}
-
-	return
+	msg.Rates[msg.Base] = 1.0
+	return msg.Rates, nil
 }
 
-func attitudeByBase(baseKey string, currencies Currencyes) (result Currencyes, err error) {
-	baseValue, ok := currencies[baseKey]
+type Params map[string]string
+
+func (p Params) Str(name string) (string, error) {
+	str, ok := p[name]
 	if !ok {
-		return result, errors.New("missing base")
+		return "", fmt.Errorf("parameter %s is required", name)
 	}
-	result = Currencyes{}
-	for currency, attitude := range currencies {
-		if currency != baseKey {
-			result[currency] = attitude/baseValue
-		}
-	}
-	return
+	return str, nil
 }
 
-func parameter(parameterKey string, r *http.Request) (string, error) {
-	params := mux.Vars(r)
-	result, ok := params[parameterKey]
-	if !ok {
-		return "", errors.New("missing parameter")
+func (p Params) Float(name string) (float64, error) {
+	str, err := p.Str(name)
+	if err != nil {
+		return 0.0, err
 	}
-	return result, nil
+	return strconv.ParseFloat(str, 64)
 }
